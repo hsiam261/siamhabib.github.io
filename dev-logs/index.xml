@@ -2,17 +2,17 @@
 <rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
   <channel>
     <title>Dev-Logs on </title>
-    <link>https://siamhabib.github.io/dev-logs/</link>
+    <link>https://hsiam261.github.io/dev-logs/</link>
     <description>Recent content in Dev-Logs on </description>
     <generator>Hugo</generator>
     <language>en-us</language>
     <lastBuildDate>Mon, 01 Jan 0001 00:00:00 +0000</lastBuildDate>
-    <atom:link href="https://siamhabib.github.io/dev-logs/index.xml" rel="self" type="application/rss+xml" />
+    <atom:link href="https://hsiam261.github.io/dev-logs/index.xml" rel="self" type="application/rss+xml" />
     <item>
       <title></title>
-      <link>https://siamhabib.github.io/dev-logs/understanding-flakes/</link>
+      <link>https://hsiam261.github.io/dev-logs/understanding-flakes/</link>
       <pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate>
-      <guid>https://siamhabib.github.io/dev-logs/understanding-flakes/</guid>
+      <guid>https://hsiam261.github.io/dev-logs/understanding-flakes/</guid>
       <description></description>
     </item>
   </channel>

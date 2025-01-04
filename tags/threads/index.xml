@@ -2,17 +2,17 @@
 <rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
   <channel>
     <title>Threads on </title>
-    <link>https://siamhabib.github.io/tags/threads/</link>
+    <link>https://hsiam261.github.io/tags/threads/</link>
     <description>Recent content in Threads on </description>
     <generator>Hugo</generator>
     <language>en-us</language>
     <lastBuildDate>Mon, 23 Dec 2024 21:15:13 +0600</lastBuildDate>
-    <atom:link href="https://siamhabib.github.io/tags/threads/index.xml" rel="self" type="application/rss+xml" />
+    <atom:link href="https://hsiam261.github.io/tags/threads/index.xml" rel="self" type="application/rss+xml" />
     <item>
       <title>Creating Threads From Scratch</title>
-      <link>https://siamhabib.github.io/posts/creating-threads-from-scratch/</link>
+      <link>https://hsiam261.github.io/posts/creating-threads-from-scratch/</link>
       <pubDate>Mon, 23 Dec 2024 21:15:13 +0600</pubDate>
-      <guid>https://siamhabib.github.io/posts/creating-threads-from-scratch/</guid>
+      <guid>https://hsiam261.github.io/posts/creating-threads-from-scratch/</guid>
       <description>Threads are an abstraction provided to applications that allow that the application to concurrently execute code while sharing the same address space. Threads can be implemented either completely in the user level or using the help of the Kernel. Userland threads are great due to being lightweight but since the kernel is not aware of their existence, they are treated like a second class citizen when compared to full blown processes.</description>
     </item>
   </channel>

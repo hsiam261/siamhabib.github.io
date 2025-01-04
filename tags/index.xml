@@ -2,38 +2,38 @@
 <rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
   <channel>
     <title>Tags on </title>
-    <link>https://siamhabib.github.io/tags/</link>
+    <link>https://hsiam261.github.io/tags/</link>
     <description>Recent content in Tags on </description>
     <generator>Hugo</generator>
     <language>en-us</language>
     <lastBuildDate>Mon, 23 Dec 2024 21:15:13 +0600</lastBuildDate>
-    <atom:link href="https://siamhabib.github.io/tags/index.xml" rel="self" type="application/rss+xml" />
+    <atom:link href="https://hsiam261.github.io/tags/index.xml" rel="self" type="application/rss+xml" />
     <item>
       <title>Building-Things-From-Scratch</title>
-      <link>https://siamhabib.github.io/tags/building-things-from-scratch/</link>
+      <link>https://hsiam261.github.io/tags/building-things-from-scratch/</link>
       <pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate>
-      <guid>https://siamhabib.github.io/tags/building-things-from-scratch/</guid>
+      <guid>https://hsiam261.github.io/tags/building-things-from-scratch/</guid>
       <description></description>
     </item>
     <item>
       <title>Linux</title>
-      <link>https://siamhabib.github.io/tags/linux/</link>
+      <link>https://hsiam261.github.io/tags/linux/</link>
       <pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate>
-      <guid>https://siamhabib.github.io/tags/linux/</guid>
+      <guid>https://hsiam261.github.io/tags/linux/</guid>
       <description></description>
     </item>
     <item>
       <title>Systems-Programming</title>
-      <link>https://siamhabib.github.io/tags/systems-programming/</link>
+      <link>https://hsiam261.github.io/tags/systems-programming/</link>
       <pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate>
-      <guid>https://siamhabib.github.io/tags/systems-programming/</guid>
+      <guid>https://hsiam261.github.io/tags/systems-programming/</guid>
       <description></description>
     </item>
     <item>
       <title>Threads</title>
-      <link>https://siamhabib.github.io/tags/threads/</link>
+      <link>https://hsiam261.github.io/tags/threads/</link>
       <pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate>
-      <guid>https://siamhabib.github.io/tags/threads/</guid>
+      <guid>https://hsiam261.github.io/tags/threads/</guid>
       <description></description>
     </item>
   </channel>
