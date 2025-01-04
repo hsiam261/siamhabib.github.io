@@ -1,193 +1,605 @@
-<!doctype html><html lang=en-us dir=ltr><head><meta charset=utf-8><meta name=viewport content="width=device-width"><link rel=icon type=image/ico href=https://siamhabib.github.io//favicon.ico><link rel=icon type=image/png sizes=16x16 href=https://siamhabib.github.io//favicon-16x16.png><link rel=icon type=image/png sizes=32x32 href=https://siamhabib.github.io//favicon-32x32.png><link rel=icon type=image/png sizes=192x192 href=https://siamhabib.github.io//android-chrome-192x192.png><link rel=apple-touch-icon sizes=180x180 href=https://siamhabib.github.io//apple-touch-icon.png><meta name=description content><title>Creating Threads From Scratch |
-</title><link rel=canonical href=https://siamhabib.github.io/posts/creating-threads-from-scratch/><meta property="og:url" content="https://siamhabib.github.io/posts/creating-threads-from-scratch/"><meta property="og:title" content="Creating Threads From Scratch"><meta property="og:description" content="Threads are an abstraction provided to applications that allow that the application to concurrently execute code while sharing the same address space. Threads can be implemented either completely in the user level or using the help of the Kernel. Userland threads are great due to being lightweight but since the kernel is not aware of their existence, they are treated like a second class citizen when compared to full blown processes."><meta property="og:locale" content="en_us"><meta property="og:type" content="article"><meta property="article:section" content="posts"><meta property="article:published_time" content="2024-12-23T21:15:13+06:00"><meta property="article:modified_time" content="2024-12-23T21:15:13+06:00"><meta property="article:tag" content="Building-Things-From-Scratch"><meta property="article:tag" content="Systems-Programming"><meta property="article:tag" content="Linux"><meta property="article:tag" content="Threads"><link rel=stylesheet href=/assets/combined.min.186794b3399a702d3092949042cdc215dea303c17e71e7c0254768448de11db8.css media=all></head><body class=auto><div class=content><header><div class=header><h1 class=header-title><a href=https://siamhabib.github.io/></a></h1><div class=flex><p class=small><a href=/>/home</a></p><p class=small><a href=/posts>/posts</a></p><p class=small><a href=/library>/library</a></p><p class=small><a href=/about>/about</a></p></div></div></header><main class=main><div><div class=single-intro-container><h1 class=single-title>Creating Threads From Scratch</h1><p class=single-readtime><time datetime=2024-12-23T21:15:13+06:00>December 23, 2024</time></p></div><div class=single-tags><span><a href=https://siamhabib.github.io/tags/building-things-from-scratch/>#Building-Things-From-Scratch</a>
-</span><span><a href=https://siamhabib.github.io/tags/systems-programming/>#Systems-Programming</a>
-</span><span><a href=https://siamhabib.github.io/tags/linux/>#Linux</a>
-</span><span><a href=https://siamhabib.github.io/tags/threads/>#Threads</a></span></div><div class=single-content><p>Threads are an abstraction provided to applications that allow that the application to concurrently execute code while sharing the same address space. Threads can be implemented either completely in the user level or using the help of the Kernel. Userland threads are great due to being lightweight but since the kernel is not aware of their existence, they are treated like a second class citizen when compared to full blown processes. Since the kernel is not responsible for scheduling them they can&rsquo;t be preempted by hardware or two threads from the same process can not be scheduled to run at the same time. This article will focus solely on how to implement kernel level threads. More precisely we will want create a posix thread like threading library for Linux in C that meet the following two requirements:</p><ol><li>preemptible by the kernel</li><li>scheduling fully managed by the kernel and</li><li>multiple threads from the same process are allowed to execute parallely if multiple processors are present.</li></ol><h2 class=heading id=posix-threads>Posix Threads
-<a href=#posix-threads>#</a></h2><p><a href=https://en.wikipedia.org/wiki/POSIX>Posix</a> is a family of IEEE standards that tries to define what an Unix operating system should behave like. POSIX.1 defines a set of APIs for concurrent programming in Unix environments. GNU/Linux &rsquo;s implementation of Posix threads is known as <a href=https://en.wikipedia.org/wiki/Native_POSIX_Thread_Library>NPTL (Native Posix Thread Library)</a> and has been a part of Linux since version 2.6 is fully integrated with the <a href=https://www.gnu.org/software/libc/>glibc</a> library since <a href=https://lists.gnu.org/archive/html/info-gnu/2004-08/msg00002.html>version 2.3.3</a>.</p><p>The whole pthreads API is really big. But the two main functions are:</p><ul><li><a href=https://pubs.opengroup.org/onlinepubs/000095399/functions/pthread_create.html><code>pthread_create</code></a>: Takes a function and it&rsquo;s arguments as input and runs it in a separate thread. The function passed to <code>pthread_create</code> is expected to take a <code>void*</code> as an argument and return a <code>void*</code> as its return value. <code>pthread_create</code> returns an integer <code>thread_id</code> that is used to join on thread.</li><li><a href=https://man7.org/linux/man-pages/man3/pthread_join.3.html><code>pthread_join</code></a>: Takes a thread id and a <code>void**</code> as input and blocks untils the thread identified by <code>thread_id</code> has terminated and then returns with the return value of the thread stored in the <code>void**</code>. The function returns an integer to indicate whether or not the join was successful or not.</li></ul><p>Since the complete standard is really big and trying to implement a whole pthread clone will be cumbersome and difficult . Furthermore, it will require some hardware dependent logic. So we will only create a simple variant of it that implements these two functions and works only on amd64 machines. Since this is a really simple thread libary with no way to kill or cancel threads or any synchronization primitives, lets call our library simple thread or <a href=https://github.com/hsiam261/sthread><code>sthread</code></a>.</p><h2 class=heading id=preemptive-threads-vs-processes-from-the-perspective-of-the-user-and-the-operating-system>Preemptive Threads vs Processes from the Perspective of the User and the Operating System
-<a href=#preemptive-threads-vs-processes-from-the-perspective-of-the-user-and-the-operating-system>#</a></h2><p>We want our operating system to be fully in charge of scheduling our threads and treat our threads as first class citizens like processes. If multiple processors are available, we want multiple threads from the same process to be able to be scheduled together in different processors at the same time. We want threads to be preempted by hardware due to timer interrupts just like processes do. So the question becomes what is the distinction between a thread and a process?</p><p>Process is an abstraction provided by the operating system to the user for a instance of a binary running in isolation. The key word to focues here is the isolation. In modern operating systems many processes concurrently run at the same time and we do not want events in one process to interfere with a different process. If such isolation was not provided, application programmers would constantly need to worry about how other processes can interfere with their applications and need to guard against them. A CPU executes hardware instructions by fetching instructions from memory one at a time and running it. An instruction can either read or write to registers or memory. To provide isolation to processes, the operating system virtualizes both memory and CPU, giving the illusion to a process that it is the sole user of the CPU and the full memory where in fact many processes are using it.</p><p>Virtualization of CPU happens by constantly pausing processes and storing the CPU state (register file) in a safe place in memory. When the OS want to resume executing the process, it loads those register values back into the registers of the CPU and it was as if the process never paused in the first place.</p><p>Virtualization of the memory happens by adding levels of indirection between the memory fetches. The Operating System gives the process the illusion that it has complete access to all addresses in a memory space. This memory space can even be larger than the size of the actual main memory. Addresses in this memory space is called the virtual address. The OS keeps a per process datastructure called the pagetable that maps virtual adresses in its virtual address space to address in its physical memory or physical storage (in case of page swapping). The operating system makes sure that the physical address mapped by two virtual addresses (not necessarily of the same process) never conflict. Physical address mapped by a virtual address of a process does not necessarily even remain the same during the execution of the whole process. Any time an instruction refers to an address, a specific hardware called the MMU or the Memory Mapping Unit consults with the pagetable of the process with the help of the OS and traslates the virtual address to its physical and then operates on that physical address instead.</p><p>When the operating system operating system pauses a process and resumes another one (this process is called a context switch), it saves the CPU context of the pausing process and restores the CPU context of the resuming process and updates the pointer of the pagetable of the current process.</p><p>Since two separate processes have different pagetables, there is no way for one process to read or write to the address space of another i.e they do not share an address space. This makes it difficult for two separate processes to co-ordinate between each other and require fancy things like IPC. This is the key distinction between a preemptive thread and a process. All threads of a process have separate CPU contexts and stacks, but they share the same address space or page table. This makes it easy to co-ordinate between threads. Furthermore since, creating a new page table takes storage and time, spawing threads are faster than spawning process and have a much smaller memory footprint.</p><p>CPU context and address space aren&rsquo;t the only state of a process that a thread can inherit. Posix standards posit that threads share the following states with its parent process:</p><ul><li>process ID</li><li>parent process ID</li><li>process group ID and session ID</li><li>controlling terminal</li><li>user and group IDs</li><li>open file descriptors</li><li>record locks (see <a href=https://man7.org/linux/man-pages/man2/fcntl.2.html><code>fcntl(2)</code></a>)</li><li>signal dispositions</li><li>file mode creation mask (<a href=https://man7.org/linux/man-pages/man2/umask.2.html><code>umask(2)</code></a>)</li><li>current directory (<a href=https://man7.org/linux/man-pages/man2/chdir.2.html><code>chdir(2)</code></a>) and root directory (<a href=https://man7.org/linux/man-pages/man2/chroot.2.html><code>chroot(2)</code></a>)</li><li>interval timers (<a href=https://man7.org/linux/man-pages/man2/setitimer.2.html><code>setitimer(2)</code></a>) and POSIX timers (<a href=https://man7.org/linux/man-pages/man2/timer_create.2.html><code>timer_create(2)</code></a>)</li><li>nice value (<a href=https://man7.org/linux/man-pages/man2/setpriority.2.html><code>setpriority(2)</code></a>)</li><li>resource limits (<a href=https://man7.org/linux/man-pages/man2/setrlimit.2.html><code>setrlimit(2)</code></a>)</li><li>measurements of the consumption of CPU time (<a href=times(2)><code>times(2)</code></a>) and resources (<a href=https://man7.org/linux/man-pages/man2/getrusage.2.html><code>getrusage(2)</code></a>)</li></ul><p>Posix standard also mention that the following attributes of each thread must be unique:</p><ul><li>stack</li><li>thread ID (the <code>pthread_t</code> data type)</li><li>signal mask (<a href=https://man7.org/linux/man-pages/man3/pthread_sigmask.3.html><code>pthread_sigmask(3)</code></a>)</li><li>the <a href=https://man7.org/linux/man-pages/man3/errno.3.html><code>errno</code></a> variable</li><li>alternate signal stack (<a href=https://man7.org/linux/man-pages/man2/sigaltstack.2.html><code>sigaltstack(2)</code></a>)</li><li>real-time scheduling policy and priority (<a href=https://man7.org/linux/man-pages/man7/sched.7.html><code>sched(7)</code></a>)</li></ul><p>The following Linux-specific features are also per-thread:</p><ul><li>capabilities (see <a href=https://man7.org/linux/man-pages/man7/capabilities.7.html><code>capabilities(7)</code></a>)</li><li>CPU affinity (<a href=https://man7.org/linux/man-pages/man7/capabilities.7.html><code>sched_setaffinity(2)</code></a>)</li></ul><h2 class=heading id=the-data-structures>The Data Structures
-<a href=#the-data-structures>#</a></h2><p>Posix Threads define the <code>pthread_t</code> type to be the user visible type to represent threads. <code>pthread_t</code> is basically a number and it stores the complete state of the thread. In <code>glibc</code>&rsquo;s implementation of NPTL, <code>pthread_t</code> is just a memory address that points to a different struct that actually stores the thread states.</p><p>Using the mentioned attributes that a Posix complaint thread has, we can create a <code>sthread</code> struct. Since, we won&rsquo;t be creating a much simpler version, not all attributes will be present in our threads implementation in <code>sthread</code>.</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-c data-lang=c><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 1</span><span><span style=color:#75715e>// filename: sthread.h
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 2</span><span><span style=color:#75715e></span>
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 3</span><span><span style=color:#75715e>#ifndef STHREAD_H
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 4</span><span><span style=color:#75715e>#define STHREAD_H
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 5</span><span><span style=color:#75715e></span>
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 6</span><span><span style=color:#75715e>#include</span> <span style=color:#75715e>&lt;stdint.h&gt;</span><span style=color:#75715e>
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 7</span><span><span style=color:#75715e>#include</span> <span style=color:#75715e>&lt;stddef.h&gt;</span><span style=color:#75715e>
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 8</span><span><span style=color:#75715e></span>
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 9</span><span><span style=color:#66d9ef>typedef</span> <span style=color:#66d9ef>struct</span> sthread_attr {
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">10</span><span>	<span style=color:#66d9ef>void</span> <span style=color:#f92672>*</span>stack_ptr;
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">11</span><span>	<span style=color:#66d9ef>size_t</span> stack_size;
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">12</span><span>} sthread_attr;
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">13</span><span>
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">14</span><span><span style=color:#66d9ef>typedef</span> <span style=color:#66d9ef>struct</span> sthread {
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">15</span><span>	<span style=color:#66d9ef>int</span> return_value;
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">16</span><span>	<span style=color:#66d9ef>void</span><span style=color:#f92672>*</span> result;
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">17</span><span>	<span style=color:#66d9ef>uint32_t</span> lock;
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">18</span><span>	<span style=color:#66d9ef>uint64_t</span> tid;
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">19</span><span>	<span style=color:#66d9ef>int</span> pidfd;
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">20</span><span>	sthread_attr thread_attributes;
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">21</span><span>} sthread;
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">22</span><span>
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">23</span><span><span style=color:#66d9ef>typedef</span> sthread<span style=color:#f92672>*</span> <span style=color:#66d9ef>sthread_t</span>;
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">24</span><span>
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">25</span><span><span style=color:#66d9ef>int</span> <span style=color:#a6e22e>sthread_create</span>(<span style=color:#66d9ef>sthread_t</span><span style=color:#f92672>*</span> <span style=color:#66d9ef>thread</span>, sthread_attr<span style=color:#f92672>*</span> thread_attr, <span style=color:#66d9ef>void</span> <span style=color:#f92672>*</span> (<span style=color:#f92672>*</span>func)(<span style=color:#66d9ef>void</span> <span style=color:#f92672>*</span>), <span style=color:#66d9ef>void</span><span style=color:#f92672>*</span> args);
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">26</span><span><span style=color:#66d9ef>int</span> <span style=color:#a6e22e>sthread_join</span>(<span style=color:#66d9ef>sthread_t</span> <span style=color:#66d9ef>thread</span>, <span style=color:#66d9ef>void</span><span style=color:#f92672>**</span> ret_val);
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">27</span><span>
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">28</span><span><span style=color:#75715e>#endif
-</span></span></span></code></pre></div><h2 class=heading id=creating-a-thread>Creating A Thread
-<a href=#creating-a-thread>#</a></h2><p>From our discussion, we came to the conclusion that a preemptive thread whose scheduling is fully managed by the operating system is just a &ldquo;process&rdquo; that shares a bunch of attributes with some other processes, the most important of which is the address space. Thus, using the Linux Process Creation API we may be able to create such a thread. The following list mentions some of the functions in Linux that can be used to create processes:</p><ul><li><a href=https://man7.org/linux/man-pages/man2/fork.2.html><code>fork</code></a></li><li><a href=https://man7.org/linux/man-pages/man2/vfork.2.html><code>vfork</code></a></li><li><a href=https://man7.org/linux/man-pages/man3/posix_spawn.3.html><code>posix_spawn</code></a></li><li><a href=https://man7.org/linux/man-pages/man2/clone.2.html><code>clone</code></a></li><li><a href=https://man7.org/linux/man-pages/man2/clone.2.html><code>clone2</code></a></li><li><a href=https://man7.org/linux/man-pages/man2/clone.2.html><code>clone3</code></a></li></ul><p><a href=https://man7.org/linux/man-pages/man2/fork.2.html><code>fork</code></a> is the most well known among the methods, but lacks the proper granularity to create a process that shares an address space. The <a href=https://man7.org/linux/man-pages/man2/clone.2.html><code>clone3</code></a> systemcall is the most versitile among all these methods and is perfect for our use case.</p><p>The <code>clone3</code> system call has two arguments:</p><ul><li><code>cl_args</code>: A pointer to a <code>clone_args</code> struct</li><li><code>size</code>: size of a <code>clone_args</code> struct (kept so that system call can later be extended)</li></ul><p>The <code>clone_args</code> struct has the following schema:</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-c data-lang=c><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 1</span><span><span style=color:#66d9ef>struct</span> clone_args {
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 2</span><span>    u64 flags;        <span style=color:#75715e>/* Flags bit mask */</span>
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 3</span><span>    u64 pidfd;        <span style=color:#75715e>/* Where to store PID file descriptor
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 4</span><span><span style=color:#75715e>                         (int *) */</span>
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 5</span><span>    u64 child_tid;    <span style=color:#75715e>/* Where to store child TID,
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 6</span><span><span style=color:#75715e>                         in child&#39;s memory (pid_t *) */</span>
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 7</span><span>    u64 parent_tid;   <span style=color:#75715e>/* Where to store child TID,
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 8</span><span><span style=color:#75715e>                         in parent&#39;s memory (pid_t *) */</span>
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 9</span><span>    u64 exit_signal;  <span style=color:#75715e>/* Signal to deliver to parent on
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">10</span><span><span style=color:#75715e>                         child termination */</span>
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">11</span><span>    u64 stack;        <span style=color:#75715e>/* Pointer to lowest byte of stack */</span>
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">12</span><span>    u64 stack_size;   <span style=color:#75715e>/* Size of stack */</span>
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">13</span><span>    u64 tls;          <span style=color:#75715e>/* Location of new TLS */</span>
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">14</span><span>    u64 set_tid;      <span style=color:#75715e>/* Pointer to a pid_t array
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">15</span><span><span style=color:#75715e>                         (since Linux 5.5) */</span>
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">16</span><span>    u64 set_tid_size; <span style=color:#75715e>/* Number of elements in set_tid
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">17</span><span><span style=color:#75715e>                         (since Linux 5.5) */</span>
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">18</span><span>    u64 cgroup;       <span style=color:#75715e>/* File descriptor for target cgroup
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">19</span><span><span style=color:#75715e>                         of child (since Linux 5.7) */</span>
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">20</span><span>};
-</span></span></code></pre></div><p><code>clone3</code> systemcall is useful in our case because we can pass in a custom address for stack, it&rsquo;s size, address to store metadata about created thread in both parent and child processes. Furthermore, we can use the flags attribute to granularly control the behavior of the newly created process. The list and description of all the flags can be found <a href=https://man7.org/linux/man-pages/man2/clone.2.html>here</a>. But some of the ones that are important to us are:</p><ul><li><code>CLONE_VM</code>: when set, child process shares the same address space as the parent</li><li><code>CLONE_THREAD</code>: child is placed in the same thread group as the parent</li><li><code>CLONE_SIGHAND</code>: child shares the same signal handlers as the parent</li><li><code>CLONE_FILES</code>: parent and child shares file descriptors</li><li><code>CLONE_FS</code>: parent and child share current directory and current root</li><li><code>CLONE_PARENT_SETTID</code>: store child thread id by at location pointed by <code>parent_tid</code> in parent process</li><li><code>CLONE_CHILD_CLEARTID</code>: clear location pointed by <code>child_tid</code> in parent process after child terminates</li></ul><p><code>clone3</code> is a systemcall and does not have a C wrapper. It must be called with assembly. When called, the <code>clone3</code> systemcall</p><ul><li>return child process pid (a positive number) in <code>rax</code> register in parent if successful</li><li>returns negative number whose absolute value is the error code in <code>rax</code> register in parent if the syscall failed</li><li>sets <code>rax</code> register as zero in child process</li></ul><p>Using the clone3 system call we can attempt to create our threads as follows:</p><ul><li>first allocate a stack</li><li>set <code>(CLONE_VM | CLONE_THREAD | CLONE_SIGHAND | CLONE_FILES | CLONE_FS | CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID)</code> as clone flags</li><li>setup and call <code>clone3</code></li><li>check the <code>rax</code> register and decide whether or not you are in the parent process or not</li><li>in the parent process, return the pid</li><li>in the child process, call the function that the thread is supposed to start on</li></ul><p>There are more subtleties to it. We can just directly call the function in the child process. Because threads. Because threads require setting up return values. The parent process must be able to join on the child thread and recieve the return value. So we would need to wrap around the original function with a wrapper as follows:</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-c data-lang=c><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 1</span><span><span style=color:#66d9ef>static</span> <span style=color:#66d9ef>void</span> <span style=color:#a6e22e>thread_done</span>(<span style=color:#66d9ef>sthread_t</span> tcb, <span style=color:#66d9ef>void</span><span style=color:#f92672>*</span> ret_val) {
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 2</span><span>	tcb<span style=color:#f92672>-&gt;</span>lock <span style=color:#f92672>=</span> <span style=color:#ae81ff>1</span>;
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 3</span><span>	tcb<span style=color:#f92672>-&gt;</span>return_value <span style=color:#f92672>=</span> ret_val;
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 4</span><span>	<span style=color:#a6e22e>syscall</span>(SYS_futex, <span style=color:#f92672>&amp;</span>tcb<span style=color:#f92672>-&gt;</span>lock, FUTEX_WAKE, INT_MAX, NULL, NULL, <span style=color:#ae81ff>0</span>);
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 5</span><span>	<span style=color:#a6e22e>syscall</span>(SYS_exit, <span style=color:#ae81ff>0</span>);
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 6</span><span>}
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 7</span><span>
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 8</span><span><span style=color:#66d9ef>static</span> <span style=color:#66d9ef>void</span> <span style=color:#a6e22e>thread_func_wrapper</span>(<span style=color:#66d9ef>void</span> <span style=color:#f92672>*</span>(<span style=color:#f92672>*</span>func)(<span style=color:#66d9ef>void</span> <span style=color:#f92672>*</span>), <span style=color:#66d9ef>void</span> <span style=color:#f92672>*</span> args, <span style=color:#66d9ef>sthread_t</span> tcb) {
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 9</span><span>	<span style=color:#66d9ef>void</span><span style=color:#f92672>*</span> ret <span style=color:#f92672>=</span> <span style=color:#a6e22e>func</span>(args);
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">10</span><span>	<span style=color:#a6e22e>thread_done</span>(tcb, ret);
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">11</span><span>}
-</span></span></code></pre></div><p>The thread uses a futex for joining. And when the thread function is done executing, a wrapper function must store the return value of that function into the <code>pthread</code> struct and signal the futex to wake any thread that joining on the thread.</p><p>So the <code>pthread_create</code> function would look something like this:</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-c data-lang=c><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 1</span><span><span style=color:#75715e>// Filename: pthread_create.c
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 2</span><span><span style=color:#75715e></span><span style=color:#66d9ef>int</span> <span style=color:#a6e22e>sthread_create</span>(<span style=color:#66d9ef>sthread_t</span><span style=color:#f92672>*</span> <span style=color:#66d9ef>thread</span>, sthread_attr<span style=color:#f92672>*</span> thread_attr, <span style=color:#66d9ef>void</span> <span style=color:#f92672>*</span> (<span style=color:#f92672>*</span>func)(<span style=color:#66d9ef>void</span> <span style=color:#f92672>*</span>), <span style=color:#66d9ef>void</span><span style=color:#f92672>*</span> args) {
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 3</span><span>	<span style=color:#66d9ef>if</span>(thread_attr <span style=color:#f92672>==</span> NULL) {
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 4</span><span>		thread_attr <span style=color:#f92672>=</span> <span style=color:#f92672>&amp;</span>default_sthread_attr;
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 5</span><span>	}
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 6</span><span>
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 7</span><span>	<span style=color:#66d9ef>void</span><span style=color:#f92672>*</span> stack_ptr <span style=color:#f92672>=</span> <span style=color:#a6e22e>allocate_stack</span>(thread_attr);
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 8</span><span>	<span style=color:#f92672>*</span><span style=color:#66d9ef>thread</span> <span style=color:#f92672>=</span> stack_ptr;
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 9</span><span>	<span style=color:#66d9ef>sthread_t</span> tcb <span style=color:#f92672>=</span> stack_ptr;
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">10</span><span>	tcb<span style=color:#f92672>-&gt;</span>lock <span style=color:#f92672>=</span> <span style=color:#ae81ff>0</span>;
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">11</span><span>
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">12</span><span>	<span style=color:#66d9ef>int</span> clone_flags <span style=color:#f92672>=</span> (CLONE_VM <span style=color:#f92672>|</span> CLONE_THREAD <span style=color:#f92672>|</span> CLONE_SIGHAND <span style=color:#f92672>|</span>
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">13</span><span>			CLONE_FILES <span style=color:#f92672>|</span> CLONE_FS <span style=color:#f92672>|</span> CLONE_PARENT_SETTID <span style=color:#f92672>|</span>
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">14</span><span>			CLONE_CHILD_CLEARTID);
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">15</span><span>
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">16</span><span>	<span style=color:#66d9ef>struct</span> clone_args cl_args <span style=color:#f92672>=</span> {
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">17</span><span>		.flags <span style=color:#f92672>=</span> clone_flags,
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">18</span><span>		.child_tid <span style=color:#f92672>=</span> (__u64)<span style=color:#f92672>&amp;</span>(tcb<span style=color:#f92672>-&gt;</span>tid),
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">19</span><span>		.pidfd <span style=color:#f92672>=</span> (__u64)<span style=color:#f92672>&amp;</span>(tcb<span style=color:#f92672>-&gt;</span>tid),
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">20</span><span>		.stack <span style=color:#f92672>=</span> (__u64)(stack_ptr),
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">21</span><span>		.stack_size <span style=color:#f92672>=</span> thread_attr<span style=color:#f92672>-&gt;</span>stack_size
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">22</span><span>	};
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">23</span><span>
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">24</span><span>	<span style=color:#66d9ef>pid_t</span> pid;
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">25</span><span>
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">26</span><span>	<span style=color:#75715e>// These variables are required just so that
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">27</span><span><span style=color:#75715e></span>	<span style=color:#75715e>// we won&#39;t need to manually handle setting up
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">28</span><span><span style=color:#75715e></span>	<span style=color:#75715e>// the registers in assembly
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">29</span><span><span style=color:#75715e></span>	<span style=color:#75715e>// only relevant to the assembly code
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">30</span><span><span style=color:#75715e></span>	<span style=color:#66d9ef>size_t</span> sz <span style=color:#f92672>=</span> <span style=color:#66d9ef>sizeof</span>(<span style=color:#66d9ef>struct</span> clone_args);
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">31</span><span>	__u64 clone_args_addr <span style=color:#f92672>=</span> <span style=color:#f92672>&amp;</span>cl_args;
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">32</span><span>	__u64 wrapper_func_addr <span style=color:#f92672>=</span> <span style=color:#f92672>&amp;</span>thread_func_wrapper;
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">33</span><span>
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">34</span><span>	__asm__ <span style=color:#66d9ef>volatile</span>(
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">35</span><span>		<span style=color:#e6db74>&#34;movq %%rax, %%r15</span><span style=color:#ae81ff>\n\t</span><span style=color:#e6db74>&#34;</span> <span style=color:#75715e>// save value of rax
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">36</span><span><span style=color:#75715e></span>		<span style=color:#75715e>// The next 4 values need to be copied into registers because
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">37</span><span><span style=color:#75715e></span>		<span style=color:#75715e>// they are required by the child thread and the child won&#39;t be able
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">38</span><span><span style=color:#75715e></span>		<span style=color:#75715e>// to read them from stack variables since the stack would change
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">39</span><span><span style=color:#75715e></span>		<span style=color:#e6db74>&#34;movq %5, %%rbx</span><span style=color:#ae81ff>\n\t</span><span style=color:#e6db74>&#34;</span>    <span style=color:#75715e>// start thread func (wrapper over func) need
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">40</span><span><span style=color:#75715e></span>		<span style=color:#e6db74>&#34;movq %2, %%r12</span><span style=color:#ae81ff>\n\t</span><span style=color:#e6db74>&#34;</span>    <span style=color:#75715e>// start thread func ARGUMENT 0: func need
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">41</span><span><span style=color:#75715e></span>		<span style=color:#e6db74>&#34;movq %6, %%r13</span><span style=color:#ae81ff>\n\t</span><span style=color:#e6db74>&#34;</span>    <span style=color:#75715e>// start thread func ARGUMENT 1: args need
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">42</span><span><span style=color:#75715e></span>		<span style=color:#e6db74>&#34;movq %7, %%r14</span><span style=color:#ae81ff>\n\t</span><span style=color:#e6db74>&#34;</span>	<span style=color:#75715e>// start thread func ARGUMENT 2: tcb need
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">43</span><span><span style=color:#75715e></span>		<span style=color:#75715e>// setting the syscall value
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">44</span><span><span style=color:#75715e></span>		<span style=color:#e6db74>&#34;movq $0, %%rax</span><span style=color:#ae81ff>\n\t</span><span style=color:#e6db74>&#34;</span>
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">45</span><span>		<span style=color:#e6db74>&#34;mov %1, %%eax</span><span style=color:#ae81ff>\n\t</span><span style=color:#e6db74>&#34;</span>     <span style=color:#75715e>// SYSTEM CALL NUMBER : SYS_clone3
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">46</span><span><span style=color:#75715e></span>		<span style=color:#e6db74>&#34;movq %3, %%rdi</span><span style=color:#ae81ff>\n\t</span><span style=color:#e6db74>&#34;</span>    <span style=color:#75715e>// zeroth argument to clone3: &amp;cl_args
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">47</span><span><span style=color:#75715e></span>		<span style=color:#e6db74>&#34;movq %4, %%rsi</span><span style=color:#ae81ff>\n\t</span><span style=color:#e6db74>&#34;</span>    <span style=color:#75715e>// first argument to clone3: sizeof(cl_args)
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">48</span><span><span style=color:#75715e></span>		<span style=color:#e6db74>&#34;syscall</span><span style=color:#ae81ff>\n\t</span><span style=color:#e6db74>&#34;</span>		<span style=color:#75715e>// Linux/amd64 system call */
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">49</span><span><span style=color:#75715e></span>		<span style=color:#e6db74>&#34;testq %%rax,%%rax</span><span style=color:#ae81ff>\n\t</span><span style=color:#e6db74>&#34;</span>	<span style=color:#75715e>// check return value */
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">50</span><span><span style=color:#75715e></span>		<span style=color:#e6db74>&#34;jne 1f</span><span style=color:#ae81ff>\n\t</span><span style=color:#e6db74>&#34;</span>		<span style=color:#75715e>// jump if parent (if return value is non zero)*/
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">51</span><span><span style=color:#75715e></span>		<span style=color:#75715e>// call the function in child thread
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">52</span><span><span style=color:#75715e></span>		<span style=color:#e6db74>&#34;movq %%r12, %%rdi</span><span style=color:#ae81ff>\n\t</span><span style=color:#e6db74>&#34;</span>    <span style=color:#75715e>// FUNCTION ARGUMENT 0: func
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">53</span><span><span style=color:#75715e></span>		<span style=color:#e6db74>&#34;movq %%r13, %%rsi</span><span style=color:#ae81ff>\n\t</span><span style=color:#e6db74>&#34;</span>    <span style=color:#75715e>// FUNCTION ARGUMENT 1: args
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">54</span><span><span style=color:#75715e></span>		<span style=color:#e6db74>&#34;movq %%r14, %%rdx</span><span style=color:#ae81ff>\n\t</span><span style=color:#e6db74>&#34;</span>	<span style=color:#75715e>// FUNCTION ARGUMENT 2: tcb
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">55</span><span><span style=color:#75715e></span>		<span style=color:#e6db74>&#34;callq *%%rbx</span><span style=color:#ae81ff>\n\t</span><span style=color:#e6db74>&#34;</span>	<span style=color:#75715e>// start subthread function */
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">56</span><span><span style=color:#75715e></span>		<span style=color:#e6db74>&#34;1:</span><span style=color:#ae81ff>\n\t</span><span style=color:#e6db74>&#34;</span> <span style=color:#75715e>// parent thread will jump to here
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">57</span><span><span style=color:#75715e></span>		<span style=color:#e6db74>&#34;movq %%rax, %0</span><span style=color:#ae81ff>\n\t</span><span style=color:#e6db74>&#34;</span> <span style=color:#75715e>//copy syscall return to pid in parent thread
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">58</span><span><span style=color:#75715e></span>		<span style=color:#e6db74>&#34;movq %%r15, %%rax</span><span style=color:#ae81ff>\t</span><span style=color:#e6db74>&#34;</span> <span style=color:#75715e>//restore rax value in in parent thread
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">59</span><span><span style=color:#75715e></span>		<span style=color:#f92672>:</span><span style=color:#e6db74>&#34;=m&#34;</span> (pid)
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">60</span><span>		<span style=color:#f92672>:</span><span style=color:#e6db74>&#34;i&#34;</span> (SYS_clone3),
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">61</span><span>		<span style=color:#e6db74>&#34;m&#34;</span> (func),
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">62</span><span>		<span style=color:#e6db74>&#34;m&#34;</span> (clone_args_addr),
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">63</span><span>		<span style=color:#e6db74>&#34;m&#34;</span> (sz),
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">64</span><span>		<span style=color:#e6db74>&#34;m&#34;</span> (wrapper_func_addr),
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">65</span><span>		<span style=color:#e6db74>&#34;m&#34;</span> (args),
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">66</span><span>		<span style=color:#e6db74>&#34;m&#34;</span> (tcb)
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">67</span><span>		<span style=color:#f92672>:</span><span style=color:#e6db74>&#34;rdi&#34;</span>, <span style=color:#e6db74>&#34;rsi&#34;</span>, <span style=color:#e6db74>&#34;rbx&#34;</span>, <span style=color:#e6db74>&#34;rdx&#34;</span>, <span style=color:#e6db74>&#34;r12&#34;</span>, <span style=color:#e6db74>&#34;r13&#34;</span>, <span style=color:#e6db74>&#34;r14&#34;</span>, <span style=color:#e6db74>&#34;r15&#34;</span>
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">68</span><span>	);
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">69</span><span>
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">70</span><span>	<span style=color:#66d9ef>if</span>(pid <span style=color:#f92672>&lt;</span> <span style=color:#ae81ff>0</span>) {
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">71</span><span>		errno <span style=color:#f92672>=</span> <span style=color:#f92672>-</span>pid; <span style=color:#75715e>// store errorno incase of error;
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">72</span><span><span style=color:#75715e></span>					  <span style=color:#75715e>// syscalls return errorno * -1;
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">73</span><span><span style=color:#75715e></span>					  <span style=color:#75715e>// negative value indicates an error
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">74</span><span><span style=color:#75715e></span>					  <span style=color:#75715e>// and the value indicates the actual error
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">75</span><span><span style=color:#75715e></span>		<span style=color:#66d9ef>return</span> <span style=color:#f92672>-</span><span style=color:#ae81ff>1</span>;
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">76</span><span>	}
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">77</span><span>
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">78</span><span>	<span style=color:#66d9ef>return</span> <span style=color:#ae81ff>0</span>;
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">79</span><span>}
-</span></span></code></pre></div><p>Note that there is another subtlety in starting the thread in the child function. Since, the child thread does not have access to the parent process stack frame, the child process can not read the values <code>func</code>, <code>wrapper_func_addr</code>, <code>args</code> and <code>tcb</code> from stack and therefore we need to copy those values into register before calling the <code>clone3</code> syscall. Child process resulting from call has the same values set in all the registers as it&rsquo;s parents in all cases except for the stack pointer and the <code>rax</code> register. So, copying them to some registers other than those will let us access them in the child process.</p><h2 class=heading id=allocating-the-stack>Allocating The Stack
-<a href=#allocating-the-stack>#</a></h2><p>For our <code>sthread_create</code> function to work, we must be able to allocate a new stack for our new thread. There are two main data structures in a process regarding address spaces. The page table, which we already introduced and memory region list, which keeps track of which ranges of memory addresses are valid in our process and their purposes.</p><p>In Linux, the whole address space is not considered valid by default. When a loader loads a program, it loads the code sets up the static region, stack and heap. But the rest of the regions are not valid. We must update the memory region list when we want to use a certain memory region for a certain purpose. Furthermore, we need to find contigious memory addresses of said size in the physical memory and update our page table as well. Both these tasks are handled by the <a href=https://man7.org/linux/man-pages/man2/mmap.2.html><code>mmap</code></a> syscall. We can allocate our stack using the <code>mmap</code> function as follows:</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-c data-lang=c><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 1</span><span><span style=color:#75715e>// Filename: stack.c
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 2</span><span><span style=color:#75715e></span><span style=color:#66d9ef>void</span><span style=color:#f92672>*</span> <span style=color:#a6e22e>allocate_stack</span>(sthread_attr<span style=color:#f92672>*</span> thread_attr) {
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 3</span><span>	<span style=color:#66d9ef>if</span>(thread_attr <span style=color:#f92672>==</span> NULL) {
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 4</span><span>		thread_attr <span style=color:#f92672>=</span> <span style=color:#f92672>&amp;</span>default_sthread_attr;
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 5</span><span>	}
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 6</span><span>
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 7</span><span>	<span style=color:#66d9ef>if</span>(thread_attr<span style=color:#f92672>-&gt;</span>stack_ptr) {
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 8</span><span>		<span style=color:#66d9ef>return</span> thread_attr<span style=color:#f92672>-&gt;</span>stack_ptr;
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 9</span><span>	}
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">10</span><span>
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">11</span><span>	<span style=color:#66d9ef>void</span><span style=color:#f92672>*</span> stack_ptr <span style=color:#f92672>=</span> <span style=color:#a6e22e>mmap</span>(NULL, thread_attr<span style=color:#f92672>-&gt;</span>stack_size, PROT_READ <span style=color:#f92672>|</span> PROT_WRITE, MAP_ANON <span style=color:#f92672>|</span> MAP_PRIVATE<span style=color:#f92672>|</span> MAP_STACK, <span style=color:#ae81ff>0</span>, <span style=color:#ae81ff>0</span>);
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">12</span><span>	<span style=color:#66d9ef>if</span>(stack_ptr <span style=color:#f92672>==</span> MAP_FAILED) {
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">13</span><span>		<span style=color:#66d9ef>return</span> NULL;
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">14</span><span>	}
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">15</span><span>
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">16</span><span>	thread_attr<span style=color:#f92672>-&gt;</span>stack_ptr <span style=color:#f92672>=</span> stack_ptr;
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">17</span><span>	<span style=color:#66d9ef>return</span> stack_ptr;
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">18</span><span>}
-</span></span></code></pre></div><h2 class=heading id=joining-on-threads>Joining On Threads
-<a href=#joining-on-threads>#</a></h2><p>We will use <a href=https://en.wikipedia.org/wiki/Futex>futex</a> for joining. Futex is short for fast userspace mutex. Futex consists of a kernel-space wait queue and an userspace integer. The idea is wait a thread on the queue or wake threads from a queue based on the value of the integer. The signature of the futex syscall is as follows:</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-c data-lang=c><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">1</span><span><span style=color:#66d9ef>long</span> <span style=color:#a6e22e>syscall</span>(SYS_futex, <span style=color:#66d9ef>uint32_t</span> <span style=color:#f92672>*</span>uaddr, <span style=color:#66d9ef>int</span> futex_op, <span style=color:#66d9ef>uint32_t</span> val,
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">2</span><span>                    <span style=color:#66d9ef>const</span> <span style=color:#66d9ef>struct</span> timespec <span style=color:#f92672>*</span>timeout,   <span style=color:#75715e>/* or: uint32_t val2 */</span>
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">3</span><span>                    <span style=color:#66d9ef>uint32_t</span> <span style=color:#f92672>*</span>uaddr2, <span style=color:#66d9ef>uint32_t</span> val3);
-</span></span></code></pre></div><p>Futex syscall allows us to perform many operations on futex words (the userspace integer that futex uses). But we are interested with only two:</p><ul><li><code>FUTEX_WAIT</code> : If the value pointed by <code>uaddr</code> equals to <code>val</code>, the thread puts itself in the queu and wait until it is woken up. If the value pointed by <code>uaddr</code> does not equal to <code>val</code>, the thread does not block. We may specify a timeout for our wait. But when specified to <code>NULL</code> it waits indefinitely until someone wakes it up using a <code>FUTEX_WAKE</code> operation.</li><li><code>FUTEX_WAKE</code>: Wakes up <code>min(val, length(wait_queue))</code> number of threads in the wait queue associated with <code>uaddr</code>. Usually val is set to $1$ or <code>INT_MAX</code> to either wake up one or all threads. But it can be any integer.</li></ul><p>To implement thread join, we store a futex in our <code>sthread</code> struct named <code>lock</code>. This value is initilized as zero and only updated when our thread terminates executing. The in our <code>thread_done</code> function we update the value to one.</p><p>When we want to join on our thread we check if the value of lock is one. If it is not, <code>sthread_join</code> blocks until it is woken up by the <code>thread_done</code> function in the other thread. If the other thread updated the value of the lock before the thread calling <code>sthread_join</code> called <code>FUTEX_WAIT</code>, no blocking will happen as expected.</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-C data-lang=C><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 1</span><span><span style=color:#75715e>//Filename: sthread_join.c
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 2</span><span><span style=color:#75715e></span><span style=color:#75715e>#include</span> <span style=color:#75715e>&lt;sthread.h&gt;</span><span style=color:#75715e>
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 3</span><span><span style=color:#75715e>#include</span> <span style=color:#75715e>&lt;unistd.h&gt;</span><span style=color:#75715e>
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 4</span><span><span style=color:#75715e>#include</span> <span style=color:#75715e>&lt;sys/syscall.h&gt;</span><span style=color:#75715e>
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 5</span><span><span style=color:#75715e>#include</span> <span style=color:#75715e>&lt;linux/futex.h&gt;</span><span style=color:#75715e>
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 6</span><span><span style=color:#75715e>#include</span> <span style=color:#75715e>&lt;linux/sched.h&gt;</span><span style=color:#75715e>
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 7</span><span><span style=color:#75715e></span>
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 8</span><span><span style=color:#75715e>#include</span> <span style=color:#75715e>&#34;../stack/stack.h&#34;</span><span style=color:#75715e>
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f"> 9</span><span><span style=color:#75715e></span>
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">10</span><span><span style=color:#66d9ef>int</span> <span style=color:#a6e22e>sthread_join</span>(<span style=color:#66d9ef>sthread_t</span> <span style=color:#66d9ef>thread</span>, <span style=color:#66d9ef>void</span><span style=color:#f92672>**</span> ret_val) {
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">11</span><span>	<span style=color:#a6e22e>syscall</span>(SYS_futex, <span style=color:#f92672>&amp;</span><span style=color:#66d9ef>thread</span><span style=color:#f92672>-&gt;</span>lock, FUTEX_WAIT, <span style=color:#ae81ff>0</span>, NULL, NULL, <span style=color:#ae81ff>0</span>);
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">12</span><span>	<span style=color:#66d9ef>if</span>(ret_val) <span style=color:#f92672>*</span>ret_val <span style=color:#f92672>=</span> <span style=color:#66d9ef>thread</span><span style=color:#f92672>-&gt;</span>result;
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">13</span><span>	<span style=color:#a6e22e>deallocate_stack</span>(<span style=color:#f92672>&amp;</span><span style=color:#66d9ef>thread</span><span style=color:#f92672>-&gt;</span>thread_attributes); <span style=color:#75715e>//multiple joins on same thread will break things
-</span></span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">14</span><span><span style=color:#75715e></span>	<span style=color:#66d9ef>return</span> <span style=color:#ae81ff>0</span>;
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">15</span><span>}
-</span></span></code></pre></div><h2 class=heading id=deallocating-the-stack>Deallocating The Stack
-<a href=#deallocating-the-stack>#</a></h2><p>Since, we are storing our <code>sthread</code> object at the end of our stack it is not possible for us to clean up the stack before the thread has joined. Thus during <code>sthread_join</code> we deallocate our stack (Note that this breaks multiple joins on the same thread).</p><p>To deallocate the stack, we simply use the <code>munmap</code> function, that removes the page table entry from our process address space and also updates our <code>vm_area_struct</code> entries.</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-c data-lang=c><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">1</span><span><span style=color:#66d9ef>int</span> <span style=color:#a6e22e>deallocate_stack</span>(<span style=color:#66d9ef>const</span> sthread_attr<span style=color:#f92672>*</span> thread_attr) {
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">2</span><span>	<span style=color:#66d9ef>return</span> <span style=color:#a6e22e>munmap</span>(thread_attr<span style=color:#f92672>-&gt;</span>stack_ptr, thread_attr<span style=color:#f92672>-&gt;</span>stack_size);
-</span></span><span style=display:flex><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:.4em;padding:0 .4em;color:#7f7f7f">3</span><span>}
-</span></span></code></pre></div><h2 class=heading id=conclusion>Conclusion
-<a href=#conclusion>#</a></h2><p>Ta da! We are done with creating our basic preemptive thread from scratch. The code for <code>sthread</code> can be found <a href=https://github.com/hsiam261/sthread>here</a>. The repository also has some example cases codes using <code>sthread</code> that you can try out and play with. There are more to threads than just creating and joining though. Specifically they are not very useful without any synchronization primitives. On our later blogs, we will add semaphore support to <code>sthread</code> using futexes.</p></div><div class=back-to-top><a href=#top>back to top</a></div></div></main></div><footer><p>Powered by
-<a href=https://gohugo.io/>Hugo</a>
-and
-<a href=https://github.com/tomfran/typo>tomfran/typo</a></p></footer></body><script>function isAuto(){return document.body.classList.contains("auto")}function setTheme(){if(!isAuto())return;document.body.classList.remove("auto");let e="light";window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches&&(e="dark"),document.body.classList.add(e)}function invertBody(){document.body.classList.toggle("dark"),document.body.classList.toggle("light")}isAuto()&&window.matchMedia("(prefers-color-scheme: dark)").addListener(invertBody),setTheme()</script></html>
+<!DOCTYPE html>
+<html lang="en-us"
+  dir="ltr">
+
+  <head>
+    <meta charset="utf-8">
+<meta name="viewport" content="width=device-width">
+
+
+
+<link rel="icon" type="image/ico" href="https://siamhabib.github.io//favicon.ico">
+<link rel="icon" type="image/png" sizes="16x16" href="https://siamhabib.github.io//favicon-16x16.png">
+<link rel="icon" type="image/png" sizes="32x32" href="https://siamhabib.github.io//favicon-32x32.png">
+<link rel="icon" type="image/png" sizes="192x192" href="https://siamhabib.github.io//android-chrome-192x192.png">
+<link rel="apple-touch-icon" sizes="180x180" href="https://siamhabib.github.io//apple-touch-icon.png">
+
+<meta name="description" content=""/>
+
+<title>
+    
+    Creating Threads From Scratch | 
+    
+</title>
+
+<link rel="canonical" href="https://siamhabib.github.io/posts/creating-threads-from-scratch/"/>
+
+<meta property="og:url" content="https://siamhabib.github.io/posts/creating-threads-from-scratch/">
+  <meta property="og:title" content="Creating Threads From Scratch">
+  <meta property="og:description" content="Threads are an abstraction provided to applications that allow that the application to concurrently execute code while sharing the same address space. Threads can be implemented either completely in the user level or using the help of the Kernel. Userland threads are great due to being lightweight but since the kernel is not aware of their existence, they are treated like a second class citizen when compared to full blown processes.">
+  <meta property="og:locale" content="en_us">
+  <meta property="og:type" content="article">
+    <meta property="article:section" content="posts">
+    <meta property="article:published_time" content="2024-12-23T21:15:13+06:00">
+    <meta property="article:modified_time" content="2024-12-23T21:15:13+06:00">
+    <meta property="article:tag" content="Building-Things-From-Scratch">
+    <meta property="article:tag" content="Systems-Programming">
+    <meta property="article:tag" content="Linux">
+    <meta property="article:tag" content="Threads">
+
+
+
+
+
+
+
+
+
+
+
+
+
+<link rel="stylesheet" href="/assets/combined.min.186794b3399a702d3092949042cdc215dea303c17e71e7c0254768448de11db8.css" media="all">
+
+
+
+
+  
+
+
+
+
+
+
+
+  </head>
+
+  
+
+  
+  
+  
+
+  <body class="auto">
+
+    <div class="content">
+      <header>
+        
+
+<div class="header">
+
+    
+
+    <h1 class="header-title">
+        <a href="https://siamhabib.github.io/"></a>
+    </h1>
+
+    <div class="flex">
+        
+
+        
+        
+      
+        <p class="small ">
+            <a href="/" >
+                /home
+            </a>
+        </p>
+        
+      
+        <p class="small ">
+            <a href="/posts" >
+                /posts
+            </a>
+        </p>
+        
+      
+        <p class="small ">
+            <a href="/library" >
+                /library
+            </a>
+        </p>
+        
+      
+        <p class="small ">
+            <a href="/about" >
+                /about
+            </a>
+        </p>
+        
+        
+    </div>
+
+    
+
+</div>
+
+      </header>
+
+      <main class="main">
+        
+
+
+
+
+
+
+
+<div >
+
+  <div class="single-intro-container">
+
+    
+
+    <h1 class="single-title">Creating Threads From Scratch</h1>
+    
+
+    
+
+    <p class="single-readtime">
+      
+      
+      
+      <time datetime="2024-12-23T21:15:13&#43;06:00">December 23, 2024</time>
+      
+
+      
+    </p>
+
+  </div>
+
+  
+
+  
+  
+
+  <div class="single-tags">
+    
+    <span>
+      <a href="https://siamhabib.github.io/tags/building-things-from-scratch/">#Building-Things-From-Scratch</a>
+    </span>
+    
+    
+    <span>
+      <a href="https://siamhabib.github.io/tags/systems-programming/">#Systems-Programming</a>
+    </span>
+    
+    
+    <span>
+      <a href="https://siamhabib.github.io/tags/linux/">#Linux</a>
+    </span>
+    
+    
+    <span>
+      <a href="https://siamhabib.github.io/tags/threads/">#Threads</a>
+    </span>
+    
+    
+  </div>
+
+  
+  
+
+  
+
+  
+
+  
+
+  <div class="single-content">
+    <p>Threads are an abstraction provided to applications that allow that the application to concurrently execute code while sharing the same address space. Threads can be implemented either completely in the user level or using the help of the Kernel. Userland threads are great due to being lightweight but since the kernel is not aware of their existence, they are treated like a second class citizen when compared to full blown processes. Since the kernel is not responsible for scheduling them they can&rsquo;t be preempted by hardware or two threads from the same process can not be scheduled to run at the same time. This article will focus solely on how to implement kernel level threads. More precisely we will want create a posix thread like threading library for Linux in C that meet the following two requirements:</p>
+<ol>
+<li>preemptible by the kernel</li>
+<li>scheduling fully managed by the kernel and</li>
+<li>multiple threads from the same process are allowed to execute parallely if multiple processors are present.</li>
+</ol>
+<h2 class="heading" id="posix-threads">
+  Posix Threads
+  <a href="#posix-threads">#</a>
+</h2>
+<p><a href="https://en.wikipedia.org/wiki/POSIX">Posix</a> is a family of IEEE standards that tries to define what an Unix operating system should behave like. POSIX.1 defines a set of APIs for concurrent programming in Unix environments. GNU/Linux &rsquo;s implementation of Posix threads is known as <a href="https://en.wikipedia.org/wiki/Native_POSIX_Thread_Library">NPTL (Native Posix Thread Library)</a> and has been a part of Linux since version 2.6 is fully integrated with the <a href="https://www.gnu.org/software/libc/">glibc</a> library since <a href="https://lists.gnu.org/archive/html/info-gnu/2004-08/msg00002.html">version 2.3.3</a>.</p>
+<p>The whole pthreads API is really big. But the two main functions are:</p>
+<ul>
+<li><a href="https://pubs.opengroup.org/onlinepubs/000095399/functions/pthread_create.html"><code>pthread_create</code></a>: Takes a function and it&rsquo;s arguments as input and runs it in a separate thread. The function passed to <code>pthread_create</code> is expected to take a <code>void*</code> as an argument and return a <code>void*</code> as its return value. <code>pthread_create</code> returns an integer <code>thread_id</code> that is used to join on thread.</li>
+<li><a href="https://man7.org/linux/man-pages/man3/pthread_join.3.html"><code>pthread_join</code></a>: Takes a thread id and a <code>void**</code> as input and blocks untils the thread identified by <code>thread_id</code> has terminated and then returns with the return value of the thread stored in the <code>void**</code>. The function returns an integer to indicate whether or not the join was successful or not.</li>
+</ul>
+<p>Since the complete standard is really big and trying to implement a whole pthread clone will be cumbersome and difficult . Furthermore, it will require some hardware dependent logic. So we will only create a simple variant of it that implements these two functions and works only on amd64 machines. Since this is a really simple thread libary with no way to kill or cancel threads or any synchronization primitives, lets call our library simple thread or <a href="https://github.com/hsiam261/sthread"><code>sthread</code></a>.</p>
+<h2 class="heading" id="preemptive-threads-vs-processes-from-the-perspective-of-the-user-and-the-operating-system">
+  Preemptive Threads vs Processes from the Perspective of the User and the Operating System
+  <a href="#preemptive-threads-vs-processes-from-the-perspective-of-the-user-and-the-operating-system">#</a>
+</h2>
+<p>We want our operating system to be fully in charge of scheduling our threads and treat our threads as first class citizens like processes. If multiple processors are available, we want multiple threads from the same process to be able to be scheduled together in different processors at the same time. We want threads to be preempted by hardware due to timer interrupts just like processes do. So the question becomes what is the distinction between a thread and a process?</p>
+<p>Process is an abstraction provided by the operating system to the user for a instance of a binary running in isolation. The key word to focues here is the isolation. In modern operating systems many processes concurrently run at the same time and we do not want events in one process to interfere with a different process. If such isolation was not provided, application programmers would constantly need to worry about how other processes can interfere with their applications and need to guard against them. A CPU executes hardware instructions by fetching instructions from memory one at a time and running it. An instruction can either read or write to registers or memory. To provide isolation to processes, the operating system virtualizes both memory and CPU, giving the illusion to a process that it is the sole user of the CPU and the full memory where in fact many processes are using it.</p>
+<p>Virtualization of CPU happens by constantly pausing processes and storing the CPU state (register file) in a safe place in memory. When the OS want to resume executing the process, it loads those register values back into the registers of the CPU and it was as if the process never paused in the first place.</p>
+<p>Virtualization of the memory happens by adding levels of indirection between the memory fetches. The Operating System gives the process the illusion that it has complete access to all addresses in a memory space. This memory space can even be larger than the size of the actual main memory. Addresses in this memory space is called the virtual address. The OS keeps a per process datastructure called the pagetable that maps virtual adresses in its virtual address space to address in its physical memory or physical storage (in case of page swapping). The operating system makes sure that the physical address mapped by two virtual addresses (not necessarily of the same process) never conflict. Physical address mapped by a virtual address of a process does not necessarily even remain the same during the execution of the whole process. Any time an instruction refers to an address, a specific hardware called the MMU or the Memory Mapping Unit consults with the pagetable of the process with the help of the OS and traslates the virtual address to its physical and then operates on that physical address instead.</p>
+<p>When the operating system operating system pauses a process and resumes another one (this process is called a context switch), it saves the CPU context of the pausing process and restores the CPU context of the resuming process and updates the pointer of the pagetable of the current process.</p>
+<p>Since two separate processes have different pagetables, there is no way for one process to read or write to the address space of another i.e they do not share an address space. This makes it difficult for two separate processes to co-ordinate between each other and require fancy things like IPC. This is the key distinction between a preemptive thread and a process. All threads of a process have separate CPU contexts and stacks, but they share the same address space or page table. This makes it easy to co-ordinate between threads. Furthermore since, creating a new page table takes storage and time, spawing threads are faster than spawning process and have a much smaller memory footprint.</p>
+<p>CPU context and address space aren&rsquo;t the only state of a process that a thread can inherit. Posix standards posit that threads share the following states with its parent process:</p>
+<ul>
+<li>process ID</li>
+<li>parent process ID</li>
+<li>process group ID and session ID</li>
+<li>controlling terminal</li>
+<li>user and group IDs</li>
+<li>open file descriptors</li>
+<li>record locks (see <a href="https://man7.org/linux/man-pages/man2/fcntl.2.html"><code>fcntl(2)</code></a>)</li>
+<li>signal dispositions</li>
+<li>file mode creation mask (<a href="https://man7.org/linux/man-pages/man2/umask.2.html"><code>umask(2)</code></a>)</li>
+<li>current directory (<a href="https://man7.org/linux/man-pages/man2/chdir.2.html"><code>chdir(2)</code></a>) and root directory (<a href="https://man7.org/linux/man-pages/man2/chroot.2.html"><code>chroot(2)</code></a>)</li>
+<li>interval timers (<a href="https://man7.org/linux/man-pages/man2/setitimer.2.html"><code>setitimer(2)</code></a>) and POSIX timers (<a href="https://man7.org/linux/man-pages/man2/timer_create.2.html"><code>timer_create(2)</code></a>)</li>
+<li>nice value (<a href="https://man7.org/linux/man-pages/man2/setpriority.2.html"><code>setpriority(2)</code></a>)</li>
+<li>resource limits (<a href="https://man7.org/linux/man-pages/man2/setrlimit.2.html"><code>setrlimit(2)</code></a>)</li>
+<li>measurements of the consumption of CPU time (<a href="times(2)"><code>times(2)</code></a>) and resources (<a href="https://man7.org/linux/man-pages/man2/getrusage.2.html"><code>getrusage(2)</code></a>)</li>
+</ul>
+<p>Posix standard also mention that the following attributes of each thread must be unique:</p>
+<ul>
+<li>stack</li>
+<li>thread ID (the <code>pthread_t</code> data type)</li>
+<li>signal mask (<a href="https://man7.org/linux/man-pages/man3/pthread_sigmask.3.html"><code>pthread_sigmask(3)</code></a>)</li>
+<li>the <a href="https://man7.org/linux/man-pages/man3/errno.3.html"><code>errno</code></a> variable</li>
+<li>alternate signal stack (<a href="https://man7.org/linux/man-pages/man2/sigaltstack.2.html"><code>sigaltstack(2)</code></a>)</li>
+<li>real-time scheduling policy and priority (<a href="https://man7.org/linux/man-pages/man7/sched.7.html"><code>sched(7)</code></a>)</li>
+</ul>
+<p>The following Linux-specific features are also per-thread:</p>
+<ul>
+<li>capabilities (see <a href="https://man7.org/linux/man-pages/man7/capabilities.7.html"><code>capabilities(7)</code></a>)</li>
+<li>CPU affinity (<a href="https://man7.org/linux/man-pages/man7/capabilities.7.html"><code>sched_setaffinity(2)</code></a>)</li>
+</ul>
+<h2 class="heading" id="the-data-structures">
+  The Data Structures
+  <a href="#the-data-structures">#</a>
+</h2>
+<p>Posix Threads define the <code>pthread_t</code> type to be the user visible type to represent threads. <code>pthread_t</code> is basically a number and it stores the complete state of the thread. In <code>glibc</code>&rsquo;s implementation of NPTL, <code>pthread_t</code> is just a memory address that points to a different struct that actually stores the thread states.</p>
+<!-- References:
+- https://sourceware.org/git/?p=glibc.git;a=blob;f=htl/pt-internal.h;h=ec71fe1867f986bddc993905554166cb368f0311;hb=7c22dcda27743658b6b8ea479283b384ad56bd5a#l62
+- https://sourceware.org/git/?p=glibc.git;a=blob;f=sysdeps/nptl/bits/pthreadtypes.h;h=bace817f0b7e0873d66f3ee495e2cb1b92c6f32b;hb=7c22dcda27743658b6b8ea479283b384ad56bd5a#l27 -->
+<p>Using the mentioned attributes that a Posix complaint thread has, we can create a <code>sthread</code> struct. Since, we won&rsquo;t be creating a much simpler version, not all attributes will be present in our threads implementation in <code>sthread</code>.</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c" data-lang="c"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 1</span><span><span style="color:#75715e">// filename: sthread.h
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 2</span><span><span style="color:#75715e"></span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 3</span><span><span style="color:#75715e">#ifndef STHREAD_H
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 4</span><span><span style="color:#75715e">#define STHREAD_H
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 5</span><span><span style="color:#75715e"></span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 6</span><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;stdint.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 7</span><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;stddef.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 8</span><span><span style="color:#75715e"></span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 9</span><span><span style="color:#66d9ef">typedef</span> <span style="color:#66d9ef">struct</span> sthread_attr {
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">10</span><span>	<span style="color:#66d9ef">void</span> <span style="color:#f92672">*</span>stack_ptr;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">11</span><span>	<span style="color:#66d9ef">size_t</span> stack_size;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">12</span><span>} sthread_attr;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">13</span><span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">14</span><span><span style="color:#66d9ef">typedef</span> <span style="color:#66d9ef">struct</span> sthread {
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">15</span><span>	<span style="color:#66d9ef">int</span> return_value;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">16</span><span>	<span style="color:#66d9ef">void</span><span style="color:#f92672">*</span> result;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">17</span><span>	<span style="color:#66d9ef">uint32_t</span> lock;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">18</span><span>	<span style="color:#66d9ef">uint64_t</span> tid;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">19</span><span>	<span style="color:#66d9ef">int</span> pidfd;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">20</span><span>	sthread_attr thread_attributes;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">21</span><span>} sthread;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">22</span><span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">23</span><span><span style="color:#66d9ef">typedef</span> sthread<span style="color:#f92672">*</span> <span style="color:#66d9ef">sthread_t</span>;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">24</span><span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">25</span><span><span style="color:#66d9ef">int</span> <span style="color:#a6e22e">sthread_create</span>(<span style="color:#66d9ef">sthread_t</span><span style="color:#f92672">*</span> <span style="color:#66d9ef">thread</span>, sthread_attr<span style="color:#f92672">*</span> thread_attr, <span style="color:#66d9ef">void</span> <span style="color:#f92672">*</span> (<span style="color:#f92672">*</span>func)(<span style="color:#66d9ef">void</span> <span style="color:#f92672">*</span>), <span style="color:#66d9ef">void</span><span style="color:#f92672">*</span> args);
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">26</span><span><span style="color:#66d9ef">int</span> <span style="color:#a6e22e">sthread_join</span>(<span style="color:#66d9ef">sthread_t</span> <span style="color:#66d9ef">thread</span>, <span style="color:#66d9ef">void</span><span style="color:#f92672">**</span> ret_val);
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">27</span><span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">28</span><span><span style="color:#75715e">#endif
+</span></span></span></code></pre></div><h2 class="heading" id="creating-a-thread">
+  Creating A Thread
+  <a href="#creating-a-thread">#</a>
+</h2>
+<p>From our discussion, we came to the conclusion that a preemptive thread whose scheduling is fully managed by the operating system is just a &ldquo;process&rdquo; that shares a bunch of attributes with some other processes, the most important of which is the address space. Thus, using the Linux Process Creation API we may be able to create such a thread. The following list mentions some of the functions in Linux that can be used to create processes:</p>
+<ul>
+<li><a href="https://man7.org/linux/man-pages/man2/fork.2.html"><code>fork</code></a></li>
+<li><a href="https://man7.org/linux/man-pages/man2/vfork.2.html"><code>vfork</code></a></li>
+<li><a href="https://man7.org/linux/man-pages/man3/posix_spawn.3.html"><code>posix_spawn</code></a></li>
+<li><a href="https://man7.org/linux/man-pages/man2/clone.2.html"><code>clone</code></a></li>
+<li><a href="https://man7.org/linux/man-pages/man2/clone.2.html"><code>clone2</code></a></li>
+<li><a href="https://man7.org/linux/man-pages/man2/clone.2.html"><code>clone3</code></a></li>
+</ul>
+<p><a href="https://man7.org/linux/man-pages/man2/fork.2.html"><code>fork</code></a> is the most well known among the methods, but lacks the proper granularity to create a process that shares an address space. The <a href="https://man7.org/linux/man-pages/man2/clone.2.html"><code>clone3</code></a> systemcall is the most versitile among all these methods and is perfect for our use case.</p>
+<p>The <code>clone3</code> system call has two arguments:</p>
+<ul>
+<li><code>cl_args</code>: A pointer to a <code>clone_args</code> struct</li>
+<li><code>size</code>: size of a <code>clone_args</code> struct (kept so that system call can later be extended)</li>
+</ul>
+<p>The <code>clone_args</code> struct has the following schema:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c" data-lang="c"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 1</span><span><span style="color:#66d9ef">struct</span> clone_args {
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 2</span><span>    u64 flags;        <span style="color:#75715e">/* Flags bit mask */</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 3</span><span>    u64 pidfd;        <span style="color:#75715e">/* Where to store PID file descriptor
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 4</span><span><span style="color:#75715e">                         (int *) */</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 5</span><span>    u64 child_tid;    <span style="color:#75715e">/* Where to store child TID,
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 6</span><span><span style="color:#75715e">                         in child&#39;s memory (pid_t *) */</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 7</span><span>    u64 parent_tid;   <span style="color:#75715e">/* Where to store child TID,
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 8</span><span><span style="color:#75715e">                         in parent&#39;s memory (pid_t *) */</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 9</span><span>    u64 exit_signal;  <span style="color:#75715e">/* Signal to deliver to parent on
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">10</span><span><span style="color:#75715e">                         child termination */</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">11</span><span>    u64 stack;        <span style="color:#75715e">/* Pointer to lowest byte of stack */</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">12</span><span>    u64 stack_size;   <span style="color:#75715e">/* Size of stack */</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">13</span><span>    u64 tls;          <span style="color:#75715e">/* Location of new TLS */</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">14</span><span>    u64 set_tid;      <span style="color:#75715e">/* Pointer to a pid_t array
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">15</span><span><span style="color:#75715e">                         (since Linux 5.5) */</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">16</span><span>    u64 set_tid_size; <span style="color:#75715e">/* Number of elements in set_tid
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">17</span><span><span style="color:#75715e">                         (since Linux 5.5) */</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">18</span><span>    u64 cgroup;       <span style="color:#75715e">/* File descriptor for target cgroup
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">19</span><span><span style="color:#75715e">                         of child (since Linux 5.7) */</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">20</span><span>};
+</span></span></code></pre></div><p><code>clone3</code> systemcall is useful in our case because we can pass in a custom address for stack, it&rsquo;s size, address to store metadata about created thread in both parent and child processes. Furthermore, we can use the flags attribute to granularly control the behavior of the newly created process. The list and description of all the flags can be found <a href="https://man7.org/linux/man-pages/man2/clone.2.html">here</a>. But some of the ones that are important to us are:</p>
+<ul>
+<li><code>CLONE_VM</code>: when set, child process shares the same address space as the parent</li>
+<li><code>CLONE_THREAD</code>: child is placed in the same thread group as the parent</li>
+<li><code>CLONE_SIGHAND</code>: child shares the same signal handlers as the parent</li>
+<li><code>CLONE_FILES</code>: parent and child shares file descriptors</li>
+<li><code>CLONE_FS</code>: parent and child share current directory and current root</li>
+<li><code>CLONE_PARENT_SETTID</code>: store child thread id by at location pointed by <code>parent_tid</code> in parent process</li>
+<li><code>CLONE_CHILD_CLEARTID</code>: clear location pointed by <code>child_tid</code> in parent process after child terminates</li>
+</ul>
+<p><code>clone3</code> is a systemcall and does not have a C wrapper. It must be called with assembly. When called, the <code>clone3</code> systemcall</p>
+<ul>
+<li>return child process pid (a positive number) in <code>rax</code> register in parent if successful</li>
+<li>returns negative number whose absolute value is the error code in <code>rax</code> register in parent if the syscall failed</li>
+<li>sets <code>rax</code> register as zero in child process</li>
+</ul>
+<p>Using the clone3 system call we can attempt to create our threads as follows:</p>
+<ul>
+<li>first allocate a stack</li>
+<li>set <code>(CLONE_VM | CLONE_THREAD | CLONE_SIGHAND | CLONE_FILES | CLONE_FS | CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID)</code> as clone flags</li>
+<li>setup and call <code>clone3</code></li>
+<li>check the <code>rax</code> register and decide whether or not you are in the parent process or not</li>
+<li>in the parent process, return the pid</li>
+<li>in the child process, call the function that the thread is supposed to start on</li>
+</ul>
+<p>There are more subtleties to it. We can just directly call the function in the child process. Because threads. Because threads require setting up return values. The parent process must be able to join on the child thread and recieve the return value. So we would need to wrap around the original function with a wrapper as follows:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c" data-lang="c"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 1</span><span><span style="color:#66d9ef">static</span> <span style="color:#66d9ef">void</span> <span style="color:#a6e22e">thread_done</span>(<span style="color:#66d9ef">sthread_t</span> tcb, <span style="color:#66d9ef">void</span><span style="color:#f92672">*</span> ret_val) {
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 2</span><span>	tcb<span style="color:#f92672">-&gt;</span>lock <span style="color:#f92672">=</span> <span style="color:#ae81ff">1</span>;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 3</span><span>	tcb<span style="color:#f92672">-&gt;</span>return_value <span style="color:#f92672">=</span> ret_val;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 4</span><span>	<span style="color:#a6e22e">syscall</span>(SYS_futex, <span style="color:#f92672">&amp;</span>tcb<span style="color:#f92672">-&gt;</span>lock, FUTEX_WAKE, INT_MAX, NULL, NULL, <span style="color:#ae81ff">0</span>);
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 5</span><span>	<span style="color:#a6e22e">syscall</span>(SYS_exit, <span style="color:#ae81ff">0</span>);
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 6</span><span>}
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 7</span><span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 8</span><span><span style="color:#66d9ef">static</span> <span style="color:#66d9ef">void</span> <span style="color:#a6e22e">thread_func_wrapper</span>(<span style="color:#66d9ef">void</span> <span style="color:#f92672">*</span>(<span style="color:#f92672">*</span>func)(<span style="color:#66d9ef">void</span> <span style="color:#f92672">*</span>), <span style="color:#66d9ef">void</span> <span style="color:#f92672">*</span> args, <span style="color:#66d9ef">sthread_t</span> tcb) {
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 9</span><span>	<span style="color:#66d9ef">void</span><span style="color:#f92672">*</span> ret <span style="color:#f92672">=</span> <span style="color:#a6e22e">func</span>(args);
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">10</span><span>	<span style="color:#a6e22e">thread_done</span>(tcb, ret);
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">11</span><span>}
+</span></span></code></pre></div><p>The thread uses a futex for joining. And when the thread function is done executing, a wrapper function must store the return value of that function into the <code>pthread</code> struct and signal the futex to wake any thread that joining on the thread.</p>
+<p>So the <code>pthread_create</code> function would look something like this:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c" data-lang="c"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 1</span><span><span style="color:#75715e">// Filename: pthread_create.c
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 2</span><span><span style="color:#75715e"></span><span style="color:#66d9ef">int</span> <span style="color:#a6e22e">sthread_create</span>(<span style="color:#66d9ef">sthread_t</span><span style="color:#f92672">*</span> <span style="color:#66d9ef">thread</span>, sthread_attr<span style="color:#f92672">*</span> thread_attr, <span style="color:#66d9ef">void</span> <span style="color:#f92672">*</span> (<span style="color:#f92672">*</span>func)(<span style="color:#66d9ef">void</span> <span style="color:#f92672">*</span>), <span style="color:#66d9ef">void</span><span style="color:#f92672">*</span> args) {
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 3</span><span>	<span style="color:#66d9ef">if</span>(thread_attr <span style="color:#f92672">==</span> NULL) {
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 4</span><span>		thread_attr <span style="color:#f92672">=</span> <span style="color:#f92672">&amp;</span>default_sthread_attr;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 5</span><span>	}
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 6</span><span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 7</span><span>	<span style="color:#66d9ef">void</span><span style="color:#f92672">*</span> stack_ptr <span style="color:#f92672">=</span> <span style="color:#a6e22e">allocate_stack</span>(thread_attr);
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 8</span><span>	<span style="color:#f92672">*</span><span style="color:#66d9ef">thread</span> <span style="color:#f92672">=</span> stack_ptr;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 9</span><span>	<span style="color:#66d9ef">sthread_t</span> tcb <span style="color:#f92672">=</span> stack_ptr;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">10</span><span>	tcb<span style="color:#f92672">-&gt;</span>lock <span style="color:#f92672">=</span> <span style="color:#ae81ff">0</span>;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">11</span><span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">12</span><span>	<span style="color:#66d9ef">int</span> clone_flags <span style="color:#f92672">=</span> (CLONE_VM <span style="color:#f92672">|</span> CLONE_THREAD <span style="color:#f92672">|</span> CLONE_SIGHAND <span style="color:#f92672">|</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">13</span><span>			CLONE_FILES <span style="color:#f92672">|</span> CLONE_FS <span style="color:#f92672">|</span> CLONE_PARENT_SETTID <span style="color:#f92672">|</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">14</span><span>			CLONE_CHILD_CLEARTID);
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">15</span><span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">16</span><span>	<span style="color:#66d9ef">struct</span> clone_args cl_args <span style="color:#f92672">=</span> {
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">17</span><span>		.flags <span style="color:#f92672">=</span> clone_flags,
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">18</span><span>		.child_tid <span style="color:#f92672">=</span> (__u64)<span style="color:#f92672">&amp;</span>(tcb<span style="color:#f92672">-&gt;</span>tid),
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">19</span><span>		.pidfd <span style="color:#f92672">=</span> (__u64)<span style="color:#f92672">&amp;</span>(tcb<span style="color:#f92672">-&gt;</span>tid),
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">20</span><span>		.stack <span style="color:#f92672">=</span> (__u64)(stack_ptr),
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">21</span><span>		.stack_size <span style="color:#f92672">=</span> thread_attr<span style="color:#f92672">-&gt;</span>stack_size
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">22</span><span>	};
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">23</span><span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">24</span><span>	<span style="color:#66d9ef">pid_t</span> pid;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">25</span><span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">26</span><span>	<span style="color:#75715e">// These variables are required just so that
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">27</span><span><span style="color:#75715e"></span>	<span style="color:#75715e">// we won&#39;t need to manually handle setting up
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">28</span><span><span style="color:#75715e"></span>	<span style="color:#75715e">// the registers in assembly
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">29</span><span><span style="color:#75715e"></span>	<span style="color:#75715e">// only relevant to the assembly code
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">30</span><span><span style="color:#75715e"></span>	<span style="color:#66d9ef">size_t</span> sz <span style="color:#f92672">=</span> <span style="color:#66d9ef">sizeof</span>(<span style="color:#66d9ef">struct</span> clone_args);
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">31</span><span>	__u64 clone_args_addr <span style="color:#f92672">=</span> <span style="color:#f92672">&amp;</span>cl_args;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">32</span><span>	__u64 wrapper_func_addr <span style="color:#f92672">=</span> <span style="color:#f92672">&amp;</span>thread_func_wrapper;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">33</span><span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">34</span><span>	__asm__ <span style="color:#66d9ef">volatile</span>(
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">35</span><span>		<span style="color:#e6db74">&#34;movq %%rax, %%r15</span><span style="color:#ae81ff">\n\t</span><span style="color:#e6db74">&#34;</span> <span style="color:#75715e">// save value of rax
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">36</span><span><span style="color:#75715e"></span>		<span style="color:#75715e">// The next 4 values need to be copied into registers because
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">37</span><span><span style="color:#75715e"></span>		<span style="color:#75715e">// they are required by the child thread and the child won&#39;t be able
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">38</span><span><span style="color:#75715e"></span>		<span style="color:#75715e">// to read them from stack variables since the stack would change
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">39</span><span><span style="color:#75715e"></span>		<span style="color:#e6db74">&#34;movq %5, %%rbx</span><span style="color:#ae81ff">\n\t</span><span style="color:#e6db74">&#34;</span>    <span style="color:#75715e">// start thread func (wrapper over func) need
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">40</span><span><span style="color:#75715e"></span>		<span style="color:#e6db74">&#34;movq %2, %%r12</span><span style="color:#ae81ff">\n\t</span><span style="color:#e6db74">&#34;</span>    <span style="color:#75715e">// start thread func ARGUMENT 0: func need
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">41</span><span><span style="color:#75715e"></span>		<span style="color:#e6db74">&#34;movq %6, %%r13</span><span style="color:#ae81ff">\n\t</span><span style="color:#e6db74">&#34;</span>    <span style="color:#75715e">// start thread func ARGUMENT 1: args need
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">42</span><span><span style="color:#75715e"></span>		<span style="color:#e6db74">&#34;movq %7, %%r14</span><span style="color:#ae81ff">\n\t</span><span style="color:#e6db74">&#34;</span>	<span style="color:#75715e">// start thread func ARGUMENT 2: tcb need
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">43</span><span><span style="color:#75715e"></span>		<span style="color:#75715e">// setting the syscall value
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">44</span><span><span style="color:#75715e"></span>		<span style="color:#e6db74">&#34;movq $0, %%rax</span><span style="color:#ae81ff">\n\t</span><span style="color:#e6db74">&#34;</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">45</span><span>		<span style="color:#e6db74">&#34;mov %1, %%eax</span><span style="color:#ae81ff">\n\t</span><span style="color:#e6db74">&#34;</span>     <span style="color:#75715e">// SYSTEM CALL NUMBER : SYS_clone3
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">46</span><span><span style="color:#75715e"></span>		<span style="color:#e6db74">&#34;movq %3, %%rdi</span><span style="color:#ae81ff">\n\t</span><span style="color:#e6db74">&#34;</span>    <span style="color:#75715e">// zeroth argument to clone3: &amp;cl_args
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">47</span><span><span style="color:#75715e"></span>		<span style="color:#e6db74">&#34;movq %4, %%rsi</span><span style="color:#ae81ff">\n\t</span><span style="color:#e6db74">&#34;</span>    <span style="color:#75715e">// first argument to clone3: sizeof(cl_args)
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">48</span><span><span style="color:#75715e"></span>		<span style="color:#e6db74">&#34;syscall</span><span style="color:#ae81ff">\n\t</span><span style="color:#e6db74">&#34;</span>		<span style="color:#75715e">// Linux/amd64 system call */
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">49</span><span><span style="color:#75715e"></span>		<span style="color:#e6db74">&#34;testq %%rax,%%rax</span><span style="color:#ae81ff">\n\t</span><span style="color:#e6db74">&#34;</span>	<span style="color:#75715e">// check return value */
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">50</span><span><span style="color:#75715e"></span>		<span style="color:#e6db74">&#34;jne 1f</span><span style="color:#ae81ff">\n\t</span><span style="color:#e6db74">&#34;</span>		<span style="color:#75715e">// jump if parent (if return value is non zero)*/
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">51</span><span><span style="color:#75715e"></span>		<span style="color:#75715e">// call the function in child thread
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">52</span><span><span style="color:#75715e"></span>		<span style="color:#e6db74">&#34;movq %%r12, %%rdi</span><span style="color:#ae81ff">\n\t</span><span style="color:#e6db74">&#34;</span>    <span style="color:#75715e">// FUNCTION ARGUMENT 0: func
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">53</span><span><span style="color:#75715e"></span>		<span style="color:#e6db74">&#34;movq %%r13, %%rsi</span><span style="color:#ae81ff">\n\t</span><span style="color:#e6db74">&#34;</span>    <span style="color:#75715e">// FUNCTION ARGUMENT 1: args
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">54</span><span><span style="color:#75715e"></span>		<span style="color:#e6db74">&#34;movq %%r14, %%rdx</span><span style="color:#ae81ff">\n\t</span><span style="color:#e6db74">&#34;</span>	<span style="color:#75715e">// FUNCTION ARGUMENT 2: tcb
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">55</span><span><span style="color:#75715e"></span>		<span style="color:#e6db74">&#34;callq *%%rbx</span><span style="color:#ae81ff">\n\t</span><span style="color:#e6db74">&#34;</span>	<span style="color:#75715e">// start subthread function */
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">56</span><span><span style="color:#75715e"></span>		<span style="color:#e6db74">&#34;1:</span><span style="color:#ae81ff">\n\t</span><span style="color:#e6db74">&#34;</span> <span style="color:#75715e">// parent thread will jump to here
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">57</span><span><span style="color:#75715e"></span>		<span style="color:#e6db74">&#34;movq %%rax, %0</span><span style="color:#ae81ff">\n\t</span><span style="color:#e6db74">&#34;</span> <span style="color:#75715e">//copy syscall return to pid in parent thread
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">58</span><span><span style="color:#75715e"></span>		<span style="color:#e6db74">&#34;movq %%r15, %%rax</span><span style="color:#ae81ff">\t</span><span style="color:#e6db74">&#34;</span> <span style="color:#75715e">//restore rax value in in parent thread
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">59</span><span><span style="color:#75715e"></span>		<span style="color:#f92672">:</span><span style="color:#e6db74">&#34;=m&#34;</span> (pid)
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">60</span><span>		<span style="color:#f92672">:</span><span style="color:#e6db74">&#34;i&#34;</span> (SYS_clone3),
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">61</span><span>		<span style="color:#e6db74">&#34;m&#34;</span> (func),
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">62</span><span>		<span style="color:#e6db74">&#34;m&#34;</span> (clone_args_addr),
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">63</span><span>		<span style="color:#e6db74">&#34;m&#34;</span> (sz),
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">64</span><span>		<span style="color:#e6db74">&#34;m&#34;</span> (wrapper_func_addr),
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">65</span><span>		<span style="color:#e6db74">&#34;m&#34;</span> (args),
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">66</span><span>		<span style="color:#e6db74">&#34;m&#34;</span> (tcb)
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">67</span><span>		<span style="color:#f92672">:</span><span style="color:#e6db74">&#34;rdi&#34;</span>, <span style="color:#e6db74">&#34;rsi&#34;</span>, <span style="color:#e6db74">&#34;rbx&#34;</span>, <span style="color:#e6db74">&#34;rdx&#34;</span>, <span style="color:#e6db74">&#34;r12&#34;</span>, <span style="color:#e6db74">&#34;r13&#34;</span>, <span style="color:#e6db74">&#34;r14&#34;</span>, <span style="color:#e6db74">&#34;r15&#34;</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">68</span><span>	);
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">69</span><span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">70</span><span>	<span style="color:#66d9ef">if</span>(pid <span style="color:#f92672">&lt;</span> <span style="color:#ae81ff">0</span>) {
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">71</span><span>		errno <span style="color:#f92672">=</span> <span style="color:#f92672">-</span>pid; <span style="color:#75715e">// store errorno incase of error;
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">72</span><span><span style="color:#75715e"></span>					  <span style="color:#75715e">// syscalls return errorno * -1;
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">73</span><span><span style="color:#75715e"></span>					  <span style="color:#75715e">// negative value indicates an error
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">74</span><span><span style="color:#75715e"></span>					  <span style="color:#75715e">// and the value indicates the actual error
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">75</span><span><span style="color:#75715e"></span>		<span style="color:#66d9ef">return</span> <span style="color:#f92672">-</span><span style="color:#ae81ff">1</span>;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">76</span><span>	}
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">77</span><span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">78</span><span>	<span style="color:#66d9ef">return</span> <span style="color:#ae81ff">0</span>;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">79</span><span>}
+</span></span></code></pre></div><p>Note that there is another subtlety in starting the thread in the child function. Since, the child thread does not have access to the parent process stack frame, the child process can not read the values <code>func</code>, <code>wrapper_func_addr</code>, <code>args</code> and <code>tcb</code> from stack and therefore we need to copy those values into register before calling the <code>clone3</code> syscall. Child process resulting from call has the same values set in all the registers as it&rsquo;s parents in all cases except for the stack pointer and the <code>rax</code> register. So, copying them to some registers other than those will let us access them in the child process.</p>
+<h2 class="heading" id="allocating-the-stack">
+  Allocating The Stack
+  <a href="#allocating-the-stack">#</a>
+</h2>
+<p>For our <code>sthread_create</code> function to work, we must be able to allocate a new stack for our new thread. There are two main data structures in a process regarding address spaces. The page table, which we already introduced and memory region list, which keeps track of which ranges of memory addresses are valid in our process and their purposes.</p>
+<p>In Linux, the whole address space is not considered valid by default. When a loader loads a program, it loads the code sets up the static region, stack and heap. But the rest of the regions are not valid. We must update the memory region list when we want to use a certain memory region for a certain purpose. Furthermore, we need to find contigious memory addresses of said size in the physical memory and update our page table as well. Both these tasks are handled by the <a href="https://man7.org/linux/man-pages/man2/mmap.2.html"><code>mmap</code></a> syscall. We can allocate our stack using the <code>mmap</code> function as follows:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c" data-lang="c"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 1</span><span><span style="color:#75715e">// Filename: stack.c
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 2</span><span><span style="color:#75715e"></span><span style="color:#66d9ef">void</span><span style="color:#f92672">*</span> <span style="color:#a6e22e">allocate_stack</span>(sthread_attr<span style="color:#f92672">*</span> thread_attr) {
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 3</span><span>	<span style="color:#66d9ef">if</span>(thread_attr <span style="color:#f92672">==</span> NULL) {
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 4</span><span>		thread_attr <span style="color:#f92672">=</span> <span style="color:#f92672">&amp;</span>default_sthread_attr;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 5</span><span>	}
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 6</span><span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 7</span><span>	<span style="color:#66d9ef">if</span>(thread_attr<span style="color:#f92672">-&gt;</span>stack_ptr) {
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 8</span><span>		<span style="color:#66d9ef">return</span> thread_attr<span style="color:#f92672">-&gt;</span>stack_ptr;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 9</span><span>	}
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">10</span><span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">11</span><span>	<span style="color:#66d9ef">void</span><span style="color:#f92672">*</span> stack_ptr <span style="color:#f92672">=</span> <span style="color:#a6e22e">mmap</span>(NULL, thread_attr<span style="color:#f92672">-&gt;</span>stack_size, PROT_READ <span style="color:#f92672">|</span> PROT_WRITE, MAP_ANON <span style="color:#f92672">|</span> MAP_PRIVATE<span style="color:#f92672">|</span> MAP_STACK, <span style="color:#ae81ff">0</span>, <span style="color:#ae81ff">0</span>);
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">12</span><span>	<span style="color:#66d9ef">if</span>(stack_ptr <span style="color:#f92672">==</span> MAP_FAILED) {
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">13</span><span>		<span style="color:#66d9ef">return</span> NULL;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">14</span><span>	}
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">15</span><span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">16</span><span>	thread_attr<span style="color:#f92672">-&gt;</span>stack_ptr <span style="color:#f92672">=</span> stack_ptr;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">17</span><span>	<span style="color:#66d9ef">return</span> stack_ptr;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">18</span><span>}
+</span></span></code></pre></div><h2 class="heading" id="joining-on-threads">
+  Joining On Threads
+  <a href="#joining-on-threads">#</a>
+</h2>
+<p>We will use <a href="https://en.wikipedia.org/wiki/Futex">futex</a> for joining. Futex is short for fast userspace mutex. Futex consists of a kernel-space wait queue and an userspace integer. The idea is wait a thread on the queue or wake threads from a queue based on the value of the integer. The signature of the futex syscall is as follows:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c" data-lang="c"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">1</span><span><span style="color:#66d9ef">long</span> <span style="color:#a6e22e">syscall</span>(SYS_futex, <span style="color:#66d9ef">uint32_t</span> <span style="color:#f92672">*</span>uaddr, <span style="color:#66d9ef">int</span> futex_op, <span style="color:#66d9ef">uint32_t</span> val,
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">2</span><span>                    <span style="color:#66d9ef">const</span> <span style="color:#66d9ef">struct</span> timespec <span style="color:#f92672">*</span>timeout,   <span style="color:#75715e">/* or: uint32_t val2 */</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">3</span><span>                    <span style="color:#66d9ef">uint32_t</span> <span style="color:#f92672">*</span>uaddr2, <span style="color:#66d9ef">uint32_t</span> val3);
+</span></span></code></pre></div><p>Futex syscall allows us to perform many operations on futex words (the userspace integer that futex uses). But we are interested with only two:</p>
+<ul>
+<li><code>FUTEX_WAIT</code> : If the value pointed by <code>uaddr</code> equals to <code>val</code>, the thread puts itself in the queu and wait until it is woken up. If the value pointed by <code>uaddr</code> does not equal to <code>val</code>, the thread does not block. We may specify a timeout for our wait. But when specified to <code>NULL</code> it waits indefinitely until someone wakes it up using a <code>FUTEX_WAKE</code> operation.</li>
+<li><code>FUTEX_WAKE</code>: Wakes up <code>min(val, length(wait_queue))</code> number of threads in the wait queue associated with <code>uaddr</code>. Usually val is set to $1$ or <code>INT_MAX</code> to either wake up one or all threads. But it can be any integer.</li>
+</ul>
+<p>To implement thread join, we store a futex in our <code>sthread</code> struct named <code>lock</code>. This value is initilized as zero and only updated when our thread terminates executing. The in our <code>thread_done</code> function we update the value to one.</p>
+<p>When we want to join on our thread we check if the value of lock is one. If it is not, <code>sthread_join</code> blocks until it is woken up by the <code>thread_done</code> function in the other thread. If the other thread updated the value of the lock before the thread calling <code>sthread_join</code> called <code>FUTEX_WAIT</code>, no blocking will happen as expected.</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-C" data-lang="C"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 1</span><span><span style="color:#75715e">//Filename: sthread_join.c
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 2</span><span><span style="color:#75715e"></span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;sthread.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 3</span><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;unistd.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 4</span><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;sys/syscall.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 5</span><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;linux/futex.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 6</span><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;linux/sched.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 7</span><span><span style="color:#75715e"></span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 8</span><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&#34;../stack/stack.h&#34;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f"> 9</span><span><span style="color:#75715e"></span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">10</span><span><span style="color:#66d9ef">int</span> <span style="color:#a6e22e">sthread_join</span>(<span style="color:#66d9ef">sthread_t</span> <span style="color:#66d9ef">thread</span>, <span style="color:#66d9ef">void</span><span style="color:#f92672">**</span> ret_val) {
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">11</span><span>	<span style="color:#a6e22e">syscall</span>(SYS_futex, <span style="color:#f92672">&amp;</span><span style="color:#66d9ef">thread</span><span style="color:#f92672">-&gt;</span>lock, FUTEX_WAIT, <span style="color:#ae81ff">0</span>, NULL, NULL, <span style="color:#ae81ff">0</span>);
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">12</span><span>	<span style="color:#66d9ef">if</span>(ret_val) <span style="color:#f92672">*</span>ret_val <span style="color:#f92672">=</span> <span style="color:#66d9ef">thread</span><span style="color:#f92672">-&gt;</span>result;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">13</span><span>	<span style="color:#a6e22e">deallocate_stack</span>(<span style="color:#f92672">&amp;</span><span style="color:#66d9ef">thread</span><span style="color:#f92672">-&gt;</span>thread_attributes); <span style="color:#75715e">//multiple joins on same thread will break things
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">14</span><span><span style="color:#75715e"></span>	<span style="color:#66d9ef">return</span> <span style="color:#ae81ff">0</span>;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">15</span><span>}
+</span></span></code></pre></div><h2 class="heading" id="deallocating-the-stack">
+  Deallocating The Stack
+  <a href="#deallocating-the-stack">#</a>
+</h2>
+<p>Since, we are storing our <code>sthread</code> object at the end of our stack it is not possible for us to clean up the stack before the thread has joined. Thus during <code>sthread_join</code> we deallocate our stack (Note that this breaks multiple joins on the same thread).</p>
+<p>To deallocate the stack, we simply use the <code>munmap</code> function, that removes the page table entry from our process address space and also updates our <code>vm_area_struct</code> entries.</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c" data-lang="c"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">1</span><span><span style="color:#66d9ef">int</span> <span style="color:#a6e22e">deallocate_stack</span>(<span style="color:#66d9ef">const</span> sthread_attr<span style="color:#f92672">*</span> thread_attr) {
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">2</span><span>	<span style="color:#66d9ef">return</span> <span style="color:#a6e22e">munmap</span>(thread_attr<span style="color:#f92672">-&gt;</span>stack_ptr, thread_attr<span style="color:#f92672">-&gt;</span>stack_size);
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f7f7f">3</span><span>}
+</span></span></code></pre></div><h2 class="heading" id="conclusion">
+  Conclusion
+  <a href="#conclusion">#</a>
+</h2>
+<p>Ta da! We are done with creating our basic preemptive thread from scratch. The code for <code>sthread</code> can be found <a href="https://github.com/hsiam261/sthread">here</a>. The repository also has some example cases codes using <code>sthread</code> that you can try out and play with. There are more to threads than just creating and joining though. Specifically they are not very useful without any synchronization primitives. On our later blogs, we will add semaphore support to <code>sthread</code> using futexes.</p>
+
+    
+  </div>
+
+  
+
+
+  
+
+  
+  
+
+  
+
+  
+
+  
+  <div class="back-to-top">
+    <a href="#top">
+      back to top
+    </a>
+  </div>
+  
+
+</div>
+
+
+      </main>
+    </div>
+
+    <footer>
+      
+
+    
+    <p>Powered by
+        <a href="https://gohugo.io/">Hugo</a>
+        and
+        <a href="https://github.com/tomfran/typo">tomfran/typo</a>
+    </p>
+    
+    
+    
+
+
+    </footer>
+
+    
+
+  </body>
+
+  <script>
+
+  function isAuto() {
+    return document.body.classList.contains("auto");
+  }
+
+  function setTheme() {
+    if (!isAuto()) {
+      return
+    }
+
+    document.body.classList.remove("auto");
+    let cls = "light";
+    if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+      cls = "dark";
+    }
+
+    document.body.classList.add(cls);
+  }
+
+  function invertBody() {
+    document.body.classList.toggle("dark");
+    document.body.classList.toggle("light");
+  }
+
+  if (isAuto()) {
+    window.matchMedia('(prefers-color-scheme: dark)').addListener(invertBody);
+  }
+
+  setTheme();
+
+</script>
+
+</html>
